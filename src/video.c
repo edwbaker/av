@@ -359,6 +359,33 @@ static void add_video_output(output_container *output, int width, int height){
   output->video_encoder = video_encoder;
 }
 
+static int nearest_sample_rate(const AVCodec *codec, int wanted){
+  const int *rates = NULL;
+  int count = 0;
+#ifdef NEW_DEFAULT_CODEC_API
+  if(avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0,
+                                  (const void **) &rates, &count) < 0)
+    return wanted;
+#else
+  rates = codec->supported_samplerates;
+#endif
+  if(rates == NULL)
+    return wanted; /* encoder imposes no list, anything goes */
+  if(count == 0)
+    while(rates[count])
+      count++;
+  int best = wanted;
+  for(int i = 0; i < count; i++){
+    int dist = rates[i] - wanted;
+    int best_dist = best - wanted;
+    if(dist < 0) dist = -dist;
+    if(best_dist < 0) best_dist = -best_dist;
+    if(i == 0 || dist < best_dist)
+      best = rates[i];
+  }
+  return best;
+}
+
 static void add_audio_output(output_container *container){
   AVCodecContext *audio_decoder = container->audio_input->decoder;
   const AVCodec *output_codec = avcodec_find_encoder(container->muxer->oformat->audio_codec);
@@ -371,7 +398,14 @@ static void add_audio_output(output_container *container){
   audio_encoder->channels = container->channels ? container->channels : audio_decoder->channels;
   audio_encoder->channel_layout = av_get_default_channel_layout(audio_encoder->channels);
 #endif
-  audio_encoder->sample_rate = container->sample_rate ? container->sample_rate : audio_decoder->sample_rate;
+  /* Not every encoder takes every rate: libopus, for one, accepts only
+     48/24/16/12/8 kHz. Pick the nearest rate it does support, as ffmpeg's own
+     command line does, and let the filter graph resample to it. */
+  int wanted_rate = container->sample_rate ? container->sample_rate : audio_decoder->sample_rate;
+  audio_encoder->sample_rate = nearest_sample_rate(output_codec, wanted_rate);
+  if(audio_encoder->sample_rate != wanted_rate && container->sample_rate)
+    Rf_warning("Encoder '%s' does not support sample rate %d, using %d instead",
+               output_codec->name, wanted_rate, audio_encoder->sample_rate);
   /* A lossless input reports a bit rate far above anything a lossy encoder will
      accept, so inheriting it makes avcodec_open2() fail. Leave it unset in that
      case and let the encoder choose its own default. */
